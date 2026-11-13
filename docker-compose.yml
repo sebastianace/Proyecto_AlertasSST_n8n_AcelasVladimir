@@ -1,0 +1,48 @@
+# Entorno local: PostgreSQL 16 (con la base sst_pesv) + n8n.
+# Uso: copia .env.example a .env, ajusta las claves y ejecuta `docker compose up -d`.
+services:
+  postgres:
+    image: postgres:16
+    container_name: alertas_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en el archivo .env}
+      # El proyecto de base de datos exige que la base se llame exactamente sst_pesv.
+      POSTGRES_DB: sst_pesv
+      TZ: America/Bogota
+    ports:
+      # 5433 en tu equipo para no chocar con un PostgreSQL local que ya use el 5432.
+      # Solo accesible desde tu propio computador (127.0.0.1).
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Los scripts de este repo quedan disponibles dentro del contenedor en /sql.
+      - ./sql:/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sst_pesv"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    # Para un entorno estable, cambia "latest" por una version fija.
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: alertas_n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      GENERIC_TIMEZONE: America/Bogota
+      TZ: America/Bogota
+      # Cifra las credenciales guardadas en n8n. Si la pierdes, tendras que volver a crearlas.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Define N8N_ENCRYPTION_KEY en el archivo .env}
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  pg_data:
+  n8n_data:

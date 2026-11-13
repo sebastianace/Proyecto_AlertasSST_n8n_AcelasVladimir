@@ -1,0 +1,68 @@
+{
+  "name": "02 - Manejo de errores",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "35bb1fa1-aa38-5d32-a534-09fb208796ef",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "REEMPLAZAR_CHAT_ID",
+        "text": "={{ 'Falló el workflow \"' + $json.workflow.name + '\"\\n' + 'Nodo: ' + ($json.execution.lastNodeExecuted || 'desconocido') + '\\n' + 'Error: ' + ($json.execution.error?.message || 'sin mensaje') + '\\n' + 'Ejecución: ' + $json.execution.url }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1522584-af91-52ed-ad8d-4640847815a2",
+      "name": "Avisar el error por Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Cómo se conecta\nEn el workflow *01*, abre **Settings → Error workflow** y elige este workflow.\nDesde ese momento cualquier ejecución fallida del 01 envía un aviso por Telegram con el nodo que falló y el enlace a la ejecución.",
+        "height": 210,
+        "width": 520,
+        "color": 4
+      },
+      "id": "3c4ba604-cef3-5bce-be5a-b9f186448187",
+      "name": "Nota: cómo se activa",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -280
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Avisar el error por Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Bogota"
+  },
+  "pinData": {}
+}

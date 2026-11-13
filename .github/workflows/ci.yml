@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  base-de-datos-y-workflows:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: sst_pesv
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d sst_pesv"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: ci_password
+      PGDATABASE: sst_pesv
+
+    steps:
+      - name: Descargar este repositorio
+        uses: actions/checkout@v4
+
+      - name: Descargar el proyecto de base de datos SST/PESV
+        uses: actions/checkout@v4
+        with:
+          repository: sebastianace/proyecto_base_de_datos_en_PostgreSQL
+          path: base_de_datos
+
+      - name: Instalar la base sst_pesv
+        run: psql -v ON_ERROR_STOP=1 -q -f base_de_datos/proyecto/sql/00_instalacion_completa.sql
+
+      - name: Crear el esquema de alertas y el rol de n8n
+        run: psql -v ON_ERROR_STOP=1 -q -v clave=clave_ci -f sql/01_esquema_alertas.sql
+
+      - name: Cargar datos de demostración
+        run: psql -v ON_ERROR_STOP=1 -q -f sql/03_datos_demo.sql
+
+      - name: Probar la consulta, la deduplicación y los permisos
+        run: bash tests/probar_consulta.sh
+
+      - name: Probar el código de los nodos Code
+        run: node tests/probar_codigo_nodos.js
+
+      - name: Validar los workflows de n8n
+        run: python3 tests/validar_workflows.py

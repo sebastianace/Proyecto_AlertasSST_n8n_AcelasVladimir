@@ -1,0 +1,445 @@
+{
+  "name": "01 - Alertas de cumplimiento SST-PESV",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "527fc829-483d-5f5e-8465-b3eb7418870d",
+      "name": "Cada día hábil a las 7:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5cb0ff84-b89e-5657-b387-04bf500b22fa",
+      "name": "Ejecución manual",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6c1242c5-a922-5f99-8002-f7cb9300cc73",
+              "name": "dias_borrador",
+              "value": 15,
+              "type": "number"
+            },
+            {
+              "id": "3109ee34-cfe5-5807-8b9d-56aea749603d",
+              "name": "dias_no_iniciado",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "8e28d540-9254-5a8c-9d68-dfad3be87398",
+              "name": "umbral_cumplimiento",
+              "value": 60,
+              "type": "number"
+            },
+            {
+              "id": "03c50e10-92e9-50b0-9e8f-ca9cee34e0c5",
+              "name": "dias_sin_repetir",
+              "value": 7,
+              "type": "number"
+            },
+            {
+              "id": "44cafd88-170b-560a-a4cb-2e5d5eb0216a",
+              "name": "modo_simulacro",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "6d68712c-b637-52cd-b358-880b545ccc13",
+              "name": "correo_prueba",
+              "value": "tu_correo@ejemplo.com",
+              "type": "string"
+            },
+            {
+              "id": "8645266d-1f0f-5202-9e54-21c3c5808506",
+              "name": "correo_remitente",
+              "value": "alertas@ejemplo.com",
+              "type": "string"
+            },
+            {
+              "id": "18f37cb5-763a-53fc-b594-112cd447e856",
+              "name": "telegram_chat_id",
+              "value": "REEMPLAZAR_CHAT_ID",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "de93485b-f992-5503-82be-89facc4fcf20",
+      "name": "Configuración",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        280,
+        110
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH docs AS (\n    -- Un documento con su sistema (SST/PESV) y sus dias de antiguedad.\n    -- Solo organizaciones activas y plantillas activas.\n    SELECT\n        d.id,\n        d.tenant_id,\n        d.title,\n        d.status,\n        s.code                                    AS sistema,\n        CURRENT_DATE - d.updated_at::date         AS dias_sin_cambios,\n        CURRENT_DATE - d.created_at::date         AS dias_desde_creacion\n    FROM documents        d\n    JOIN tenants          t  ON t.id  = d.tenant_id\n    JOIN tenanttemplates  tt ON tt.id = d.tenanttemplate_id\n    JOIN templates        tp ON tp.id = tt.template_id\n    JOIN type_system_sst  s  ON s.id  = tp.type_system_sst_id\n    WHERE t.is_active\n      AND tt.is_active\n),\nestancados AS (\n    SELECT\n        id, tenant_id, title, status, sistema,\n        CASE WHEN status = 'BORRADOR' THEN dias_sin_cambios\n             ELSE dias_desde_creacion\n        END AS dias\n    FROM docs\n    WHERE (status = 'BORRADOR'    AND dias_sin_cambios    >= $1::int)\n       OR (status = 'NO_INICIADO' AND dias_desde_creacion >= $2::int)\n),\ncumplimiento AS (\n    -- Se calcula en vivo desde documents. Las vistas materializadas\n    -- vm_template_*_docs_summary pueden estar desactualizadas hasta que\n    -- alguien las refresque, y una alerta no debe basarse en datos viejos.\n    SELECT\n        tenant_id,\n        sistema,\n        COUNT(*)::int                                          AS total,\n        COUNT(*) FILTER (WHERE status = 'FINALIZADO')::int     AS finalizados,\n        ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'FINALIZADO')\n              / COUNT(*), 1)                                   AS porcentaje\n    FROM docs\n    GROUP BY tenant_id, sistema\n),\nbajo_umbral AS (\n    SELECT * FROM cumplimiento WHERE porcentaje < $3::numeric\n)\nSELECT\n    t.id            AS tenant_id,\n    t.name          AS organizacion,\n    t.contact_email AS correo_contacto,\n    -- Cada detalle va en su propia subconsulta: con dos LEFT JOIN seguidos\n    -- las filas se multiplicarian entre si (mismo cuidado que en la vista A25).\n    (SELECT COALESCE(jsonb_agg(jsonb_build_object(\n                'id',      e.id,\n                'titulo',  e.title,\n                'estado',  e.status,\n                'sistema', e.sistema,\n                'dias',    e.dias\n            ) ORDER BY e.dias DESC, e.id), '[]'::jsonb)\n       FROM estancados e\n      WHERE e.tenant_id = t.id)                              AS documentos_estancados,\n    (SELECT COALESCE(jsonb_agg(jsonb_build_object(\n                'sistema',     b.sistema,\n                'total',       b.total,\n                'finalizados', b.finalizados,\n                'porcentaje',  b.porcentaje\n            ) ORDER BY b.sistema), '[]'::jsonb)\n       FROM bajo_umbral b\n      WHERE b.tenant_id = t.id)                              AS sistemas_bajo_umbral\nFROM tenants t\nWHERE t.is_active\n  AND (EXISTS (SELECT 1 FROM estancados  e WHERE e.tenant_id = t.id)\n    OR EXISTS (SELECT 1 FROM bajo_umbral b WHERE b.tenant_id = t.id))\n  -- No repetir: si ya se le envio una alerta real hace poco, se omite.\n  -- Los simulacros (es_simulacro) no cuentan, para poder probar todos los dias.\n  AND NOT EXISTS (\n        SELECT 1\n          FROM alertas.bitacora a\n         WHERE a.tenant_id    = t.id\n           AND a.estado       = 'ENVIADA'\n           AND NOT a.es_simulacro\n           AND a.creada_en    > CURRENT_TIMESTAMP - make_interval(days => $4::int)\n  )\nORDER BY t.id;",
+        "options": {
+          "queryReplacement": "={{ [$('Configuración').first().json.dias_borrador, $('Configuración').first().json.dias_no_iniciado, $('Configuración').first().json.umbral_cumplimiento, $('Configuración').first().json.dias_sin_repetir] }}"
+        }
+      },
+      "id": "46a0cdf1-df17-5289-b8c2-5258dbd6de5e",
+      "name": "Detectar hallazgos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        560,
+        110
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "aef5632e-902c-5955-9f6c-3ed93dfd654d",
+              "leftValue": "={{ $json.tenant_id !== undefined && $json.tenant_id !== null }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "178f697e-5c0c-5420-b7ac-ff1866569b75",
+      "name": "¿Hay hallazgos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        840,
+        110
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Configuración').first().json.telegram_chat_id }}",
+        "text": "={{ 'Alertas SST/PESV (modo ' + ($('Configuración').first().json.modo_simulacro ? 'SIMULACRO' : 'REAL') + '): hoy no hay organizaciones por alertar (sin hallazgos, o ya se les alertó en los últimos ' + $('Configuración').first().json.dias_sin_repetir + ' días).' }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "8a73ca00-6616-555d-a8dd-810361af16ff",
+      "name": "Aviso: nada que alertar",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Construye un correo por organización a partir de lo que devolvió la consulta.\n// Modo: \"Run Once for All Items\".\nconst cfg = $('Configuración').first().json;\nconst simulacro = cfg.modo_simulacro === true || cfg.modo_simulacro === 'true';\nconst MAX_FILAS = 8; // máximo de documentos listados en cada correo\n\n// Escapa texto antes de meterlo en HTML (los títulos vienen de la base de datos).\nconst esc = (t) =>\n  String(t ?? '').replace(/[&<>\"']/g, (c) =>\n    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c])\n  );\n\n// Reglas de severidad (explicadas en docs/decisiones.md):\n//   ALTA  = algún sistema con menos de 30 % finalizado, o 5+ documentos estancados\n//   MEDIA = algún sistema bajo el umbral configurado, o 3-4 documentos estancados\n//   BAJA  = el resto\nfunction calcularSeveridad(estancados, bajos) {\n  const peor = bajos.length ? Math.min(...bajos.map((b) => Number(b.porcentaje))) : 100;\n  if (peor < 30 || estancados.length >= 5) return 'ALTA';\n  if (bajos.length > 0 || estancados.length >= 3) return 'MEDIA';\n  return 'BAJA';\n}\n\nconst COLOR = { ALTA: '#c0392b', MEDIA: '#e67e22', BAJA: '#2e86c1' };\n\nreturn $input.all().map((item, indice) => {\n  const f = item.json;\n  const estancados = f.documentos_estancados ?? [];\n  const bajos = f.sistemas_bajo_umbral ?? [];\n  const severidad = calcularSeveridad(estancados, bajos);\n  const destinatario = simulacro ? cfg.correo_prueba : f.correo_contacto;\n\n  const filasSistemas = bajos\n    .map(\n      (b) =>\n        `<tr><td style=\"padding:6px 10px\"><b>${esc(b.sistema)}</b></td>` +\n        `<td style=\"padding:6px 10px\">${b.finalizados} de ${b.total} documentos finalizados</td>` +\n        `<td style=\"padding:6px 10px;color:${COLOR[severidad]}\"><b>${b.porcentaje} %</b></td></tr>`\n    )\n    .join('');\n\n  const filasDocs = estancados\n    .slice(0, MAX_FILAS)\n    .map(\n      (d) =>\n        `<tr><td style=\"padding:6px 10px\">${esc(d.sistema)}</td>` +\n        `<td style=\"padding:6px 10px\">${esc(d.titulo)}</td>` +\n        `<td style=\"padding:6px 10px\">${\n          d.estado === 'BORRADOR' ? 'Borrador sin cambios hace' : 'Sin iniciar hace'\n        } ${d.dias} días</td></tr>`\n    )\n    .join('');\n  const resto = estancados.length - MAX_FILAS;\n\n  const html =\n    `<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:640px;color:#222\">` +\n    (simulacro\n      ? `<p style=\"background:#fff3cd;padding:10px;border-radius:6px\">SIMULACRO: este correo se enviaría a <b>${esc(\n          f.correo_contacto\n        )}</b>. Se redirigió a la dirección de prueba.</p>`\n      : '') +\n    `<h2 style=\"margin-bottom:4px\">Alerta de cumplimiento SST / PESV</h2>` +\n    `<p style=\"margin-top:0\"><b>${esc(f.organizacion)}</b> · ` +\n    `severidad <b style=\"color:${COLOR[severidad]}\">${severidad}</b></p>` +\n    (bajos.length\n      ? `<h3>Sistemas por debajo del ${cfg.umbral_cumplimiento} % de cumplimiento</h3>` +\n        `<table style=\"border-collapse:collapse;width:100%\">${filasSistemas}</table>`\n      : '') +\n    (estancados.length\n      ? `<h3>Documentos que requieren atención (${estancados.length})</h3>` +\n        `<table style=\"border-collapse:collapse;width:100%;font-size:14px\">${filasDocs}</table>` +\n        (resto > 0 ? `<p>… y ${resto} más.</p>` : '')\n      : '') +\n    `<p style=\"color:#666;font-size:12px;margin-top:24px\">Mensaje automático generado con n8n. ` +\n    `Un documento está estancado si lleva ${cfg.dias_borrador}+ días en borrador sin cambios ` +\n    `o ${cfg.dias_no_iniciado}+ días sin iniciarse.</p></div>`;\n\n  return {\n    json: {\n      tenant_id: Number(f.tenant_id),\n      organizacion: f.organizacion,\n      severidad,\n      destinatario,\n      correo_remitente: cfg.correo_remitente,\n      es_simulacro: simulacro,\n      asunto: `${simulacro ? '[SIMULACRO] ' : ''}Alerta ${severidad} SST/PESV: ${f.organizacion}`,\n      html,\n      resumen: {\n        documentos_estancados: estancados.length,\n        sistemas_bajo_umbral: bajos,\n      },\n    },\n    pairedItem: { item: indice },\n  };\n});\n"
+      },
+      "id": "b9e319a1-4d1a-5fd4-ae52-c0224a74ee4d",
+      "name": "Construir mensaje",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        110
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.correo_remitente }}",
+        "toEmail": "={{ $json.destinatario }}",
+        "subject": "={{ $json.asunto }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "a4189cd4-3a0e-50c2-b7dc-8c9a62e969b2",
+      "name": "Enviar correo",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1400,
+        110
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Decide el estado del envío (ENVIADA o ERROR) para guardarlo en la bitácora.\n// Modo: \"Run Once for Each Item\".\n// El nodo de correo tiene \"On Error: Continue\", así que si falla para una\n// organización no se detiene todo: llega aquí un ítem con el campo \"error\".\nconst base = $('Construir mensaje').item.json;\nconst err = $json.error;\nconst fallo = err !== undefined && err !== null && err !== '';\n\nreturn {\n  json: {\n    tenant_id: base.tenant_id,\n    organizacion: base.organizacion,\n    severidad: base.severidad,\n    destinatario: base.destinatario,\n    es_simulacro: base.es_simulacro,\n    resumen: base.resumen,\n    estado: fallo ? 'ERROR' : 'ENVIADA',\n    // Cadena vacía (no null) y la consulta usa NULLIF: evita problemas con nulos en los parámetros.\n    detalle_error: fallo ? String(err.message ?? err).slice(0, 500) : '',\n  },\n};\n"
+      },
+      "id": "18ea5389-7558-5cf3-be8e-2d44094a17af",
+      "name": "Preparar registro",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        110
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO alertas.bitacora\n    (tenant_id, severidad, resumen, destinatario, es_simulacro, estado, detalle_error)\nVALUES ($1::int, $2, $3::jsonb, $4, $5::boolean, $6, NULLIF($7::text, ''));",
+        "options": {
+          "queryReplacement": "={{ [$json.tenant_id, $json.severidad, JSON.stringify($json.resumen), $json.destinatario, $json.es_simulacro, $json.estado, $json.detalle_error] }}"
+        }
+      },
+      "id": "470c690f-7800-5c47-9f15-69ce670056fc",
+      "name": "Guardar en bitácora",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1960,
+        110
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Arma el resumen de la ejecución para el administrador (se envía por Telegram).\n// Modo: \"Run Once for All Items\".\nconst cfg = $('Configuración').first().json;\nconst simulacro = cfg.modo_simulacro === true || cfg.modo_simulacro === 'true';\nconst filas = $('Preparar registro').all().map((i) => i.json);\n\nconst enviadas = filas.filter((f) => f.estado === 'ENVIADA').length;\nconst errores = filas.length - enviadas;\nconst lineas = filas.map(\n  (f) => `- ${f.organizacion}: ${f.severidad} (${f.estado === 'ENVIADA' ? 'enviada' : 'ERROR'})`\n);\n\nconst texto = [\n  `Alertas SST/PESV - modo ${simulacro ? 'SIMULACRO' : 'REAL'}`,\n  `Organizaciones alertadas: ${filas.length} | enviadas: ${enviadas} | con error: ${errores}`,\n  '',\n  ...lineas,\n].join('\\n');\n\nreturn [{ json: { texto } }];\n"
+      },
+      "id": "cf0caf4e-e248-544e-b316-442cb0448569",
+      "name": "Resumen para el administrador",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        110
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Configuración').first().json.telegram_chat_id }}",
+        "text": "={{ $json.texto }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "44a01a02-9d06-51ef-a828-e3c52d43f352",
+      "name": "Aviso por Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2520,
+        110
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Alertas de cumplimiento SST / PESV\nCada día hábil revisa la base `sst_pesv`, detecta documentos estancados y sistemas con bajo cumplimiento, envía **un correo por organización** y un resumen al administrador por Telegram.\n\nTodo envío queda en `alertas.bitacora` y no se repite en `dias_sin_repetir` días.",
+        "height": 270,
+        "width": 560,
+        "color": 4
+      },
+      "id": "d8dcba02-c4b5-557c-aeec-34666398f535",
+      "name": "Nota: qué hace",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -330
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### 1. Configuración\nTodos los umbrales están aquí. **`modo_simulacro = true`** envía todo a `correo_prueba` en lugar de a las organizaciones reales.\n\nPásalo a `false` solo cuando quieras enviar de verdad.",
+        "height": 270,
+        "width": 420,
+        "color": 7
+      },
+      "id": "c4a420ad-3933-5b9a-9aeb-8f813dfc7c3a",
+      "name": "Nota: configuración",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        280,
+        -330
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Si algo falla\n- Postgres y correo reintentan solos.\n- Si el correo falla para una organización, las demás siguen y el fallo queda como `ERROR` en la bitácora.\n- Un error grave activa el workflow *02 - Manejo de errores*.",
+        "height": 270,
+        "width": 480,
+        "color": 3
+      },
+      "id": "168fa768-3cf2-534c-8352-983751aeed80",
+      "name": "Nota: errores",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        -330
+      ]
+    }
+  ],
+  "connections": {
+    "Cada día hábil a las 7:00": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecución manual": {
+      "main": [
+        [
+          {
+            "node": "Configuración",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuración": {
+      "main": [
+        [
+          {
+            "node": "Detectar hallazgos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detectar hallazgos": {
+      "main": [
+        [
+          {
+            "node": "¿Hay hallazgos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Hay hallazgos?": {
+      "main": [
+        [
+          {
+            "node": "Construir mensaje",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Aviso: nada que alertar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construir mensaje": {
+      "main": [
+        [
+          {
+            "node": "Enviar correo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar correo": {
+      "main": [
+        [
+          {
+            "node": "Preparar registro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar registro": {
+      "main": [
+        [
+          {
+            "node": "Guardar en bitácora",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar en bitácora": {
+      "main": [
+        [
+          {
+            "node": "Resumen para el administrador",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resumen para el administrador": {
+      "main": [
+        [
+          {
+            "node": "Aviso por Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Bogota"
+  },
+  "pinData": {}
+}
